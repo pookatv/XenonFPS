@@ -44,6 +44,9 @@ The patch lives in memory only. Nothing is written to storage, so a reboot start
 > [!WARNING]
 > This edits the GPU command ring. A bad packet can crash the GPU or hang the console. The one-dword `MEM_WRITE` packets used here are known to work; multi-dword `MEM_WRITE` packets did not on the console this was developed on, so don't try to merge writes into larger packets.
 
+> [!WARNING]
+> For games with an unlocked framerate (no V-Sync), be mindful that the overlay is known to tear/flicker when the screen tears
+
 ## Build
 
 You need the Xbox 360 XDK. Point `XEDK` at the SDK folder and run `./build.sh` from Git Bash. The result is `build/XenonFPS.xex`.
