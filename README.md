@@ -16,11 +16,8 @@ plugin3 = Usb:\XenonFPS.xex
 
 3. Run BadUpdate or BadAvatar as usual. The counter appears about 20 seconds after the plugin loads, which gives the video system time to come up before the hook is installed.
 
-> [!NOTE]
-> The hook only draws on 1280x720 32-bit frame buffers. On any other layout (some menus, other resolutions, start-up) it skips the frame and draws nothing.
-
 > [!IMPORTANT]
-> The hook patches the first four instructions of `VdSwap` at `0x800C8B90` and refuses to install unless they match the kernel it was written against. On a different kernel it does nothing and sets `D_PATCH` to `0xBAD` (see Diagnostics). Tested on: *(fill in your kernel version here)*.
+> The hook patches the first four instructions of `VdSwap` at `0x800C8B90` and refuses to install unless they match the kernel it was written against. On a different kernel it does nothing and sets `D_PATCH` to `0xBAD` (see Diagnostics). Tested on: 2.0.17559.0 (BadUpdate)
 
 ## Settings
 
