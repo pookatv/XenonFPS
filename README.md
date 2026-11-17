@@ -1,6 +1,6 @@
 # XenonFPS
 
-DashLaunch plugin for Xbox 360 that draws an FPS counter on top of any game. It hooks the kernel's `VdSwap` call and has the GPU draw a small box with the frame rate into the front buffer, so there is no extra work on the game's own render path.
+DashLaunch plugin for Xbox 360 that draws an FPS counter on top of any game as well as the dashboard. It hooks the kernel's `VdSwap` call and has the GPU draw a small box with the frame rate into the front buffer, so there is no extra work on the game's own render path.
 
 ## Setup
 
