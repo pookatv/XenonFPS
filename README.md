@@ -19,6 +19,9 @@ plugin3 = Usb:\XenonFPS.xex
 > [!IMPORTANT]
 > The hook patches the first four instructions of `VdSwap` at `0x800C8B90` and refuses to install unless they match the kernel it was written against. On a different kernel it does nothing and sets `D_PATCH` to `0xBAD` (see Diagnostics). Tested on: 2.0.17559.0 (BadUpdate)
 
+> [!WARNING]
+> For games with an unlocked framerate (no V-Sync), be mindful that the overlay may tear/flicker when the screen tears.
+
 ## Settings
 
 All settings are `#define`s at the top of `XenonFPS.cpp`. Change them and rebuild.
@@ -43,9 +46,6 @@ The patch lives in memory only. Nothing is written to storage, so a reboot start
 
 > [!WARNING]
 > This edits the GPU command ring. A bad packet can crash the GPU or hang the console. The one-dword `MEM_WRITE` packets used here are known to work; multi-dword `MEM_WRITE` packets did not on the console this was developed on, so don't try to merge writes into larger packets.
-
-> [!WARNING]
-> For games with an unlocked framerate (no V-Sync), be mindful that the overlay is known to tear/flicker when the screen tears
 
 ## Build
 
