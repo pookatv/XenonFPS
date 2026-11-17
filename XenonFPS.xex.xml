@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<!-- imagexex config for XenonFPS.xex (DashLaunch sysdll plugin). -->
+<xex>
+  <baseaddr addr="0x91D80000" />
+  <sysdll />
+  <format>
+    <compressed />
+  </format>
+  <mediatypes>
+    <allpackages />
+  </mediatypes>
+  <gameregion>
+    <all />
+  </gameregion>
+  <version major="0" minor="1" build="0" qfe="0" />
+  <exportcontainer name="/" />
+</xex>
