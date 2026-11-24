@@ -29,19 +29,19 @@
 #define BOX_CORNER            CORNER_TOP_LEFT   // <-- change this to move the box
 #define BOX_MARGIN_TILES      0                 // move the box inward from the edges
 
-// The screen is 40 x 22.5 tiles of 32x32 px and the box is 2 tiles wide. The bottom row is 20
+// The corner is resolved per frame against the frame's real width and height (see HookVdSwap).
 #if   BOX_CORNER == CORNER_TOP_LEFT
-  #define BOX_TILE_ROW    (BOX_MARGIN_TILES)
-  #define BOX_TILE_COL    (BOX_MARGIN_TILES)
+  #define BOX_AT_RIGHT    0
+  #define BOX_AT_BOTTOM   0
 #elif BOX_CORNER == CORNER_TOP_RIGHT
-  #define BOX_TILE_ROW    (BOX_MARGIN_TILES)
-  #define BOX_TILE_COL    (38 - BOX_MARGIN_TILES)
+  #define BOX_AT_RIGHT    1
+  #define BOX_AT_BOTTOM   0
 #elif BOX_CORNER == CORNER_BOTTOM_LEFT
-  #define BOX_TILE_ROW    (20 - BOX_MARGIN_TILES)
-  #define BOX_TILE_COL    (BOX_MARGIN_TILES)
+  #define BOX_AT_RIGHT    0
+  #define BOX_AT_BOTTOM   1
 #elif BOX_CORNER == CORNER_BOTTOM_RIGHT
-  #define BOX_TILE_ROW    (20 - BOX_MARGIN_TILES)
-  #define BOX_TILE_COL    (38 - BOX_MARGIN_TILES)
+  #define BOX_AT_RIGHT    1
+  #define BOX_AT_BOTTOM   1
 #else
   #error BOX_CORNER must be one of the CORNER_* values
 #endif
@@ -50,9 +50,12 @@
   #error BOX_MARGIN_TILES must be 0..10
 #endif
 
-#define BOX_X0          (BOX_TILE_COL * 32)
-#define BOX_Y0          (BOX_TILE_ROW * 32)
-#define BOX_TILE_OFF    ((BOX_TILE_ROW * 40 + BOX_TILE_COL) << 12)   // byte offset of the box in a 1280-wide tiled surface
+// The box image is always built at tile (0,0): the layout inside a tile does not depend on where
+// the tile is, so the same image works at every position and every surface width. Where the box
+// is drawn is worked out per frame from that frame's own size and pitch.
+#define BOX_X0          0
+#define BOX_Y0          0
+#define BOX_TILE_OFF    0
 
 #define BOX_DWORDS      2048                          // the box is 2 tiles = 8192 bytes = 2048 dwords
 #define STREAM_DWORDS   (BOX_DWORDS * 3)              // one MEM_WRITE (3 dwords) per box dword
@@ -68,6 +71,13 @@
 #define FB_ENTRIES      4                             // front buffers remembered
 #define SLOT_COUNT      (FB_ENTRIES * 2)              // two image versions per buffer
 #define START_DELAY_MS  20000                         // let video come up before touching VdSwap
+
+// Controller toggle: press these buttons together to hide or show the overlay (any of the 4 pads).
+// Buttons: XINPUT_GAMEPAD_DPAD_UP / DOWN / LEFT / RIGHT, START, BACK, LEFT_THUMB, RIGHT_THUMB
+// (the stick clicks), LEFT_SHOULDER, RIGHT_SHOULDER, A, B, X, Y. Join them with |.
+#define TOGGLE_BUTTONS    (XINPUT_GAMEPAD_RIGHT_THUMB | XINPUT_GAMEPAD_DPAD_UP)
+#define OVERLAY_START_ON  1         // 1 = shown at start, 0 = hidden until toggled on
+#define INPUT_POLL_MS     50        // how often the pads are checked (the FPS update rate is unchanged)
 
 typedef LONG NTSTATUS;
 
@@ -106,6 +116,28 @@ enum {
     D_VERSION,    // current image version
     D_CMDVA,      // command memory, CPU address
     D_CMDPHYS,    // command memory, physical address
+    D_REJ_GATE,   // frames rejected by the 1280x720 32-bit check
+    D_LAST_D0,    // texture fetch dword 0 of the last rejected frame
+    D_LAST_D1,    // dword 1
+    D_LAST_D2,    // dword 2
+    D_LAST_FB,    // front buffer address of the last rejected frame
+    D_REJ_PTR,    // frames passed but the ring pointer was unaligned or below 0xA0000000
+    D_LAST_A,     // last ring pointer seen
+    D_REJ_NOCMD,  // skipped: no command memory
+    D_REJ_NOIMG,  // skipped: no box image yet
+    D_REJ_FB,     // skipped: front buffer below 0xE0000000
+    D_REJ_RING,   // skipped: ring signature did not match
+    D_LAST_RB0,   // rb[0] at the last ring mismatch
+    D_LAST_RB4,   // rb[4] at the last ring mismatch
+    D_EXC,        // exceptions inside the hook
+    D_OK_D1,      // texture fetch dword 1 of the last accepted frame (format and endian)
+    D_BAD_A,      // ring pointer at the last ring mismatch
+    D_BAD0,       // rb[0..15] at the last ring mismatch
+    D_BAD_LAST = D_BAD0 + 15,
+    D_ENABLED,    // 1 = overlay shown, 0 = hidden
+    D_TOGGLES,    // times the combo has toggled the overlay
+    D_PADS,       // bitmask of controllers XInput can see (bit 0 = pad 1)
+    D_HIDDEN,     // frames that would have got the box but the overlay was hidden
     D_COUNT
 };
 static volatile DWORD g_diag[D_COUNT] = { 0xD1A60100 };
@@ -121,6 +153,7 @@ static DWORD g_fbTab[FB_ENTRIES];
 static DWORD g_fbNext = 0;
 static DWORD g_slotFb[SLOT_COUNT];
 static DWORD g_slotVer[SLOT_COUNT];
+static DWORD g_slotOff[SLOT_COUNT];     // where in the buffer the stream draws, so a mode change rebuilds it
 
 // Which box dwords get written each frame (indices into the box image), built once by the Worker
 static DWORD g_writeIdx[BOX_DWORDS];
@@ -130,6 +163,10 @@ static volatile DWORD g_writeCount = 0;
 // Current image = g_boxImgs[g_boxVer & 1]. g_boxVer = 0 means no image yet
 __declspec(align(128)) static DWORD g_boxImgs[2][BOX_DWORDS];
 static volatile DWORD g_boxVer = 0;
+
+// Overlay on/off, flipped by the controller combo (see PollToggle)
+static volatile DWORD g_overlayOn = OVERLAY_START_ON;
+static bool g_comboWasHeld = false;
 
 // CPU address -> physical address as the GPU sees it. 0 if the range is not one we understand
 // 0xA0000000-0xDFFFFFFF is a plain mask; 0xE0000000+ has the extra 0x1000 the front buffer needs
@@ -156,7 +193,7 @@ typedef DWORD (*VdSwapFn)(PVOID, PVOID, PVOID, PVOID, PVOID, PVOID, PVOID, PVOID
 
 // Builds (or reuses) the command stream for this buffer and image version, and returns its slot
 // Returns -1 if it cannot be used
-static int StreamFor(DWORD fb, DWORD ver)
+static int StreamFor(DWORD fb, DWORD ver, DWORD boxOff)
 {
     // Find or assign this front buffer's entry
     DWORD e = 0;
@@ -167,10 +204,10 @@ static int StreamFor(DWORD fb, DWORD ver)
     }
     DWORD slot = e * 2 + (ver & 1);
 
-    if (g_slotFb[slot] != fb || g_slotVer[slot] != ver) {
+    if (g_slotFb[slot] != fb || g_slotVer[slot] != ver || g_slotOff[slot] != boxOff) {
         volatile DWORD *cb = (volatile DWORD *)(g_cmdVa + slot * SLOT_BYTES);
         const DWORD *img   = g_boxImgs[ver & 1];
-        DWORD x = PhysOf(fb + BOX_TILE_OFF);
+        DWORD x = PhysOf(fb + boxOff);
         DWORD n = 0;
         DWORD cnt = g_writeCount;
         for (DWORD w = 0; w < cnt; w++) {
@@ -184,6 +221,7 @@ static int StreamFor(DWORD fb, DWORD ver)
         __sync();
         g_slotFb[slot]  = fb;
         g_slotVer[slot] = ver;
+        g_slotOff[slot] = boxOff;
         g_diag[D_STREAMS] = g_diag[D_STREAMS] + 1;
     }
     return (int)slot;
@@ -203,20 +241,47 @@ static DWORD HookVdSwap(PVOID a, PVOID b, PVOID c, PVOID d, PVOID e, PVOID f, PV
     DWORD wid   = (d2 & 0x1FFF) + 1;
     DWORD hgt   = ((d2 >> 13) & 0x1FFF) + 1;
 
-    // Only handle a 1280x720 32-bit frame buffer
-    bool ok = ((d0 >> 31) == 1 && fmt == 6 && pitch == 1280 && wid == 1280 && hgt == 720 &&
+    // Only handle 32-bit frame buffers of a size we have seen: 1280x720 and 960x720.
+    // To add a mode, read its width/height/pitch with Read-Diag and add it here.
+    bool ok = ((d0 >> 31) == 1 && (fmt == 6 || fmt == 54) && pitch == wid &&
+               ((wid == 1280 && hgt == 720) || (wid == 960 && hgt == 720)) &&
                fb >= 0xA0000000 && (fb & 0xFFF) == 0 && fb == (d1 & 0xFFFFF000));
+
+    // Byte offset of the box inside this frame buffer: the corner and margin, in whole 32x32 tiles.
+    DWORD boxOff = 0;
+    if (ok) {
+        DWORD cols = wid >> 5;                   // tiles across (40 for 1280, 30 for 960)
+        DWORD rows = hgt >> 5;                   // whole tile rows (22 for 720)
+        DWORD tpr  = pitch >> 5;                 // tiles per row in memory
+        DWORD col  = BOX_AT_RIGHT  ? (cols - 2 - BOX_MARGIN_TILES) : BOX_MARGIN_TILES;
+        DWORD row  = BOX_AT_BOTTOM ? (rows - 2 - BOX_MARGIN_TILES) : BOX_MARGIN_TILES;
+        boxOff = (row * tpr + col) << 12;        // 4096 bytes per tile
+    }
+
+    if (!ok) {
+        g_diag[D_REJ_GATE] = g_diag[D_REJ_GATE] + 1;
+        g_diag[D_LAST_D0]  = d0;
+        g_diag[D_LAST_D1]  = d1;
+        g_diag[D_LAST_D2]  = d2;
+        g_diag[D_LAST_FB]  = fb;
+    } else {
+        g_diag[D_OK_D1]    = d1;            // format and endian of the last accepted frame
+    }
 
     DWORD ret = ((VdSwapFn)(PVOID)&g_tramp[0])(a, b, c, d, e, f, g, h, i, j);
 
     // a = the GPU ring: the kernel's fence packet at rb[0..3], a 56-dword NOP area at rb[4..63]
-    if (ok && (((DWORD)a) & 3) == 0 && ((DWORD)a) >= 0xA0000000) {
+    if (ok && !g_overlayOn) {
+        g_diag[D_HIDDEN] = g_diag[D_HIDDEN] + 1;
+    } else if (ok && (((DWORD)a) & 3) == 0 && ((DWORD)a) >= 0xA0000000) {
         __try {
             volatile DWORD *rb = (volatile DWORD *)a;
             DWORD ver = g_boxVer;           // read once: the image index and tags must agree
-            if (g_cmdPhys && ver && fb >= 0xE0000000u &&
-                rb[0] == 0xC0025800 && rb[4] == 0xC03A1000) {
-                int slot = StreamFor(fb, ver);
+            DWORD r0  = rb[0];
+            DWORD r4  = rb[4];
+            if (g_cmdPhys && ver && fb >= 0xA0000000u &&
+                r0 == 0xC0025800 && r4 == 0xC03A1000) {
+                int slot = StreamFor(fb, ver, boxOff);
                 rb[4] = 0xC0013F00;                         // INDIRECT_BUFFER
                 rb[5] = g_cmdPhys + (DWORD)slot * SLOT_BYTES;
                 rb[6] = g_writeCount * 3;                   // 3 dwords per MEM_WRITE
@@ -226,10 +291,25 @@ static DWORD HookVdSwap(PVOID a, PVOID b, PVOID c, PVOID d, PVOID e, PVOID f, PV
                 g_diag[D_QUEUED] = g_diag[D_QUEUED] + 1;
             } else {
                 g_diag[D_SKIPPED] = g_diag[D_SKIPPED] + 1;
+                if (!g_cmdPhys)                g_diag[D_REJ_NOCMD] = g_diag[D_REJ_NOCMD] + 1;
+                else if (!ver)                 g_diag[D_REJ_NOIMG] = g_diag[D_REJ_NOIMG] + 1;
+                else if (fb < 0xA0000000u)     g_diag[D_REJ_FB]    = g_diag[D_REJ_FB] + 1;
+                else {
+                    g_diag[D_REJ_RING] = g_diag[D_REJ_RING] + 1;
+                    g_diag[D_LAST_RB0] = r0;
+                    g_diag[D_LAST_RB4] = r4;
+                    g_diag[D_BAD_A]    = (DWORD)a;
+                    for (DWORD q = 0; q < 16; q++)
+                        g_diag[D_BAD0 + q] = rb[q];
+                }
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             g_diag[D_SKIPPED] = g_diag[D_SKIPPED] + 1;
+            g_diag[D_EXC]     = g_diag[D_EXC] + 1;
         }
+    } else if (ok) {
+        g_diag[D_REJ_PTR] = g_diag[D_REJ_PTR] + 1;
+        g_diag[D_LAST_A]  = (DWORD)a;
     }
     return ret;
 }
@@ -364,9 +444,31 @@ static void InstallHook()
     g_diag[D_PATCH] = 3; // patch installed
 }
 
+// Checks the controllers for the toggle combo and flips the overlay once per press (not while held)
+static void PollToggle()
+{
+    DWORD pads = 0;
+    bool held  = false;
+    for (DWORD u = 0; u < 4; u++) {
+        XINPUT_STATE st;
+        if (XInputGetState(u, &st) == ERROR_SUCCESS) {
+            pads |= (1u << u);
+            if ((st.Gamepad.wButtons & TOGGLE_BUTTONS) == TOGGLE_BUTTONS) held = true;
+        }
+    }
+    g_diag[D_PADS] = pads;
+    if (held && !g_comboWasHeld) {
+        g_overlayOn = g_overlayOn ? 0 : 1;
+        g_diag[D_ENABLED] = g_overlayOn;
+        g_diag[D_TOGGLES] = g_diag[D_TOGGLES] + 1;
+    }
+    g_comboWasHeld = held;
+}
+
 static DWORD WINAPI Worker(LPVOID)
 {
     g_diag[D_STATE] = 1;
+    g_diag[D_ENABLED] = g_overlayOn;
 
     // GPU-readable memory for the command streams.
     PVOID cb = XPhysicalAlloc(SLOT_COUNT * SLOT_BYTES, (ULONG_PTR)(~(ULONG_PTR)0), 0, PAGE_READWRITE);
@@ -392,8 +494,10 @@ static DWORD WINAPI Worker(LPVOID)
         ULONGLONG t  = __mftb();
         ULONGLONG el = t - t0;
         if (el < 24937500ULL) {
-            // Sleep out the rest of the 0.5 s window (rounded up), then re-check
-            DelayMs((DWORD)(((24937500ULL - el) * 1000ULL) / 49875000ULL) + 1);
+            // Sleep until the next pad check or the end of the 0.5 s window, whichever comes first
+            DWORD left = (DWORD)(((24937500ULL - el) * 1000ULL) / 49875000ULL) + 1;
+            DelayMs(left < INPUT_POLL_MS ? left : INPUT_POLL_MS);
+            PollToggle();
             continue;
         }
 
